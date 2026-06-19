@@ -1,16 +1,57 @@
-# React + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+# Eco-Pantry
 
-Currently, two official plugins are available:
+Eco-Pantry is a full-stack app to help households reduce food waste by tracking pantry inventory, scanning fridge/receipt images, generating zero-waste recipes, and coordinating donations to nearby NGOs.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+This repository contains:
 
-## React Compiler
+- `web/` — Vite + React frontend (UI, scanner, chat widget, pages)
+- `server/` — Express API and MongoDB models (inventory, recipes, donations, chat, auth)
+- `android/` — Android app skeleton (Kotlin)
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Quick start (development)
 
-## Expanding the ESLint configuration
+1. Install dependencies from the repository root:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```powershell
+npm install
+```
+
+2. Create environment variables for the server. Example keys are shown in `server/.env.example`.
+
+3. Start both frontend and backend in development:
+
+```powershell
+npm run dev
+```
+
+Run just the frontend or backend:
+
+```powershell
+npm run dev:frontend
+npm run dev:backend
+```
+
+Important environment variables (see `server/.env.example`):
+
+- `MONGO_URI` — MongoDB connection string (required)
+- `JWT_SECRET` — JWT signing secret for auth
+- `GROQ_API_KEY` — API key for Groq AI services (vision, chat, transcription). If missing, AI features will fall back to mock responses.
+- `GOOGLE_MAPS_API_KEY` — optional, used to find nearby NGOs
+- `FRONTEND_URL` — optional, allowed CORS origin for production frontend
+
+Useful endpoints (server)
+
+- `GET /api/inventory` — list inventory items (uses `x-user-id` header to scope by family)
+- `POST /api/inventory/scan` — upload image for AI-based scan and auto-add items
+- `POST /api/recipes/generate` — generate zero-waste recipes from soon-to-expire items
+- `POST /api/chat` — inventory-aware AI assistant (message + optional history)
+- `GET /health` — health/readiness probe (checks DB connectivity)
+
+Notes and development tips
+
+- The server relies heavily on external AI services (Groq). For offline development, the server provides mock fallbacks but results differ from production.
+- End-to-end tests use Selenium/Chromedriver (`npm run test:e2e`). See `run_e2e_tests.js` for details.
+- Consider adding a `.env.example` file (already present in `server/.env.example`) to share required variables without secrets.
+
+If you want, I can also add CI, Docker support, and basic tests.

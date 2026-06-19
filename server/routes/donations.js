@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Donation = require('../models/Donation');
 const InventoryItem = require('../models/InventoryItem');
+const { validateDonationsCreate } = require('../middleware/validators');
 
 // Simple memory cache to prevent rate-limiting from public API requests
 const ngoCache = {};
@@ -207,7 +208,7 @@ router.get('/', async (req, res) => {
 
 // @route   POST /api/donations
 // @desc    Create a new donation request
-router.post('/', async (req, res) => {
+router.post('/', validateDonationsCreate, async (req, res) => {
   try {
     const { ngoId, ngoName, items, pickupAddress } = req.body;
     const userId = req.headers['x-user-id'] || 'anonymous';

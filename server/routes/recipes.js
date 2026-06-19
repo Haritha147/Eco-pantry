@@ -4,7 +4,7 @@ const Recipe = require('../models/Recipe');
 const InventoryItem = require('../models/InventoryItem');
 const User = require('../models/User');
 
-// Raw fetch used for Gemini to ensure API key works correctly
+// Raw fetch used for Groq API calls
 
 async function getUserFamilyCode(userId) {
   if (!userId || userId === 'anonymous') return null;
@@ -49,9 +49,9 @@ router.post('/generate', async (req, res) => {
 
     const inventoryNames = inventory.map(item => item.name);
 
-    // Prompt Gemini for Zero-Waste Recipes using MUST-USE Red Zone items
+    // Prompt Groq for Zero-Waste Recipes using MUST-USE Red Zone items
     const prompt = `You are a Zero-Waste culinary expert. I absolutely MUST use these specific ingredients nearing expiration: ${inventoryNames.join(', ')}. Generate exactly 2 unique, zero-waste recipes that prioritize using ALL of these exact items.
-    Return ONLY a raw JSON array of objects. Do not wrap in markdown or backticks. Each object must have:
+    Return a JSON object containing a 'recipes' field which is an array of recipe objects. Each recipe object must have:
     - 'title' (string)
     - 'description' (string, MUST include the calculated monetary savings in ₹. Example: "Saves ₹120")
     - 'matchScore' (number 0-100)
@@ -62,12 +62,6 @@ router.post('/generate', async (req, res) => {
     let rawText = '';
     
     try {
-        const payload = {
-            model: 'llama-3.3-70b-versatile',
-            messages: [{ role: 'user', content: prompt }],
-            response_format: { type: 'json_object' }
-        };
-
         console.log('Sending ingredients to Groq API for recipe generation...');
         const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
@@ -75,7 +69,20 @@ router.post('/generate', async (req, res) => {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({
+                model: 'llama-3.3-70b-versatile',
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'You are a zero-waste culinary expert. Output JSON containing a list of recipes.'
+                    },
+                    {
+                        role: 'user',
+                        content: prompt
+                    }
+                ],
+                response_format: { type: 'json_object' }
+            })
         });
 
         if (!response.ok) {
@@ -85,37 +92,40 @@ router.post('/generate', async (req, res) => {
         
         const data = await response.json();
         rawText = data.choices?.[0]?.message?.content || '';
-        rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+        rawText = rawText.trim();
         console.log('Groq raw recipe response:', rawText);
     } catch (apiErr) {
         console.error('Groq Recipe Generation Failed:', apiErr.message);
         console.log('Falling back to MOCK recipe data...');
-        rawText = JSON.stringify([
-            {
-                title: "Zero-Waste Veggie Stir Fry",
-                description: "A quick and delicious stir fry using your exact ingredients. Saves ₹120.",
-                matchScore: 95,
-                matchedIngredients: inventoryNames,
-                missingIngredients: ["Soy Sauce", "Cooking Oil"],
-                instructions: ["Chop all ingredients.", "Heat oil in a pan.", "Stir fry for 10 minutes and serve hot."]
-            },
-            {
-                title: "Eco-Pantry Soup",
-                description: "A warm, comforting soup to reduce waste. Saves ₹85.",
-                matchScore: 80,
-                matchedIngredients: inventoryNames,
-                missingIngredients: ["Vegetable Broth", "Salt", "Pepper"],
-                instructions: ["Boil the broth.", "Add your ingredients.", "Simmer for 20 minutes until tender."]
-            }
-        ]);
+        rawText = JSON.stringify({
+            recipes: [
+                {
+                    title: "Zero-Waste Veggie Stir Fry",
+                    description: "A quick and delicious stir fry using your exact ingredients. Saves ₹120.",
+                    matchScore: 95,
+                    matchedIngredients: inventoryNames,
+                    missingIngredients: ["Soy Sauce", "Cooking Oil"],
+                    instructions: ["Chop all ingredients.", "Heat oil in a pan.", "Stir fry for 10 minutes and serve hot."]
+                },
+                {
+                    title: "Eco-Pantry Soup",
+                    description: "A warm, comforting soup to reduce waste. Saves ₹85.",
+                    matchScore: 80,
+                    matchedIngredients: inventoryNames,
+                    missingIngredients: ["Vegetable Broth", "Salt", "Pepper"],
+                    instructions: ["Boil the broth.", "Add your ingredients.", "Simmer for 20 minutes until tender."]
+                }
+            ]
+        });
     }
 
     let generatedRecipes = [];
     try {
-        generatedRecipes = JSON.parse(rawText);
+        const parsed = JSON.parse(rawText);
+        generatedRecipes = Array.isArray(parsed) ? parsed : (parsed.recipes || []);
     } catch (e) {
-        console.error('Failed to parse Gemini recipe JSON:', e);
-        return res.status(500).json({ msg: 'Failed to parse Gemini response' });
+        console.error('Failed to parse Groq recipe JSON:', e);
+        return res.status(500).json({ msg: 'Failed to parse Groq response' });
     }
 
     // Associate user with recipes

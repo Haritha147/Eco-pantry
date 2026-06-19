@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const User = require('../models/User');
 const InventoryItem = require('../models/InventoryItem');
-// Raw fetch used for Gemini to ensure API key works correctly
+// Raw fetch used for Groq API calls
 
 async function getUserFamilyCode(userId) {
   if (!userId || userId === 'anonymous') return null;
@@ -59,20 +59,23 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
   }
 });
 
+const { validateChatMessage } = require('../middleware/validators');
+
 // @route   POST /api/chat
 // @desc    Interact with the inventory-aware AI Eco Assistant
-router.post('/', async (req, res) => {
+router.post('/', validateChatMessage, async (req, res) => {
+  const { message, history } = req.body;
+  const userId = req.headers['x-user-id'];
+
+  if (!message) {
+    return res.status(400).json({ msg: 'Message is required' });
+  }
+
+  // Default context details
+  let userDetails = { name: 'Eco Chef', dietaryRestrictions: 'None', householdSize: 2 };
+  let inventoryNames = [];
+
   try {
-    const { message, history } = req.body;
-    const userId = req.headers['x-user-id'];
-
-    if (!message) {
-      return res.status(400).json({ msg: 'Message is required' });
-    }
-
-    // Default context details
-    let userDetails = { name: 'Eco Chef', dietaryRestrictions: 'None', householdSize: 2 };
-    let inventoryNames = [];
 
     if (userId) {
       // Fetch user profile from DB (handle both ObjectId and offline string formats)
@@ -115,20 +118,25 @@ Guidelines:
 4. Keep replies relatively concise (under 3 short paragraphs), engaging, and cleanly formatted using markdown.
 5. Answer questions about how the app works (e.g., earning Eco Points by scanning fridge photos, and marking items as preserved).`;
 
-    const contents = (req.body.history || []).map(msg => ({
-      role: msg.role === 'ai' ? 'assistant' : 'user',
-      content: msg.text
-    }));
-
-    const finalContents = [
-      { role: 'system', content: systemPrompt },
-      ...contents,
-      { role: 'user', content: message }
+    const messages = [
+      { role: 'system', content: systemPrompt }
     ];
+
+    (req.body.history || []).forEach(msg => {
+      messages.push({
+        role: msg.role === 'ai' ? 'assistant' : 'user',
+        content: msg.text
+      });
+    });
+
+    messages.push({
+      role: 'user',
+      content: message
+    });
 
     const payload = {
       model: 'llama-3.3-70b-versatile',
-      messages: finalContents
+      messages: messages
     };
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {

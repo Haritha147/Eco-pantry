@@ -6,8 +6,11 @@ const fs = require('fs');
 const InventoryItem = require('../models/InventoryItem');
 const ScanHistory = require('../models/ScanHistory');
 const User = require('../models/User');
+const { validateInventoryCreate } = require('../middleware/validators');
 
-// Raw fetch used for Gemini to ensure API key works correctly
+// Raw fetch used for Groq to ensure API key works correctly
+const Recipe = require('../models/Recipe');
+const Donation = require('../models/Donation');
 
 async function getUserFamilyCode(userId) {
   if (!userId || userId === 'anonymous') return null;
@@ -87,7 +90,7 @@ router.get('/analytics', async (req, res) => {
 
 // @route   POST /api/inventory
 // @desc    Add a new inventory item manually
-router.post('/', async (req, res) => {
+router.post('/', validateInventoryCreate, async (req, res) => {
   try {
     const { name, category, expirationDate, quantity } = req.body;
     const userId = req.headers['x-user-id'];
@@ -109,42 +112,47 @@ router.post('/', async (req, res) => {
 });
 
 // @route   POST /api/inventory/scan
-// @desc    Upload image for CV scan and mock AI response
+// @desc    Upload image for CV scan and Groq AI response
 router.post('/scan', upload.single('image'), async (req, res) => {
   try {
-    // req.file contains the uploaded image information
     if (!req.file) {
       return res.status(400).json({ msg: 'No image file uploaded' });
     }
     
     console.log('Image uploaded successfully:', req.file.path);
 
-    // Send to Gemini Vision
-    const prompt = "Analyze this image, which may be a photo of a fridge/pantry OR a grocery receipt. If it is a fridge/pantry, identify the major food items clearly visible. If it is a receipt, extract the purchased food items from the text. For each identified item, ensure that the 'expirationDays' is a highly accurate and realistic estimate for the specific food item's general shelf life. For each item, provide a clever preservation hack to extend its life. Output the bounding box 'box' array as exactly 4 integers [ymin, xmin, ymax, xmax] normalized from 0 to 1000 representing the bounding box of the item in the image (if it's a receipt, just provide [0,0,0,0] for the box).";
+    const prompt = "Analyze this image, which may be a photo of a fridge/pantry OR a grocery receipt. Identify the food items. Return a JSON object with an 'items' array where each object has: 'name' (string), 'category' (Produce/Dairy/Meat/Grains/Beverages/Misc), 'confidenceScore' (number 0-100), 'expirationDays' (number, realistic shelf life in days), 'preservationTip' (string, hack), and 'box' (array of 4 numbers [ymin, xmin, ymax, xmax] from 0 to 1000 representing bounding box, or [0,0,0,0] if it's a receipt).";
     
     const imageBase64 = fs.readFileSync(req.file.path).toString("base64");
     console.log('Sending image to Groq Vision API...');
     
-    const payload = {
-      model: 'llama-3.2-90b-vision-preview',
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: 'List every food item you can identify in this image. For each item provide: name, category (Produce/Dairy/Meat/Grains/Beverages/Misc), confidenceScore (0-100), expirationDays (realistic shelf life), preservationTip (a clever hack), and box [0,0,0,0]. Return ONLY a raw JSON array of objects, no markdown.' },
-            { type: 'image_url', image_url: { url: `data:${req.file.mimetype};base64,${imageBase64}` } }
-          ]
-        }
-      ]
-    };
-
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        model: 'llama-3.2-90b-vision-preview',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: prompt
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:${req.file.mimetype};base64,${imageBase64}`
+                }
+              }
+            ]
+          }
+        ],
+        response_format: { type: 'json_object' }
+      })
     });
 
     if (!response.ok) {
@@ -153,18 +161,17 @@ router.post('/scan', upload.single('image'), async (req, res) => {
     }
 
     const data = await response.json();
-    const responseText = data.choices?.[0]?.message?.content || '';
+    const responseText = data.choices?.[0]?.message?.content || '{}';
     
     let detectedItems = [];
     try {
-        detectedItems = JSON.parse(responseText.replace(/```json/g, '').replace(/```/g, '').trim());
-        console.log('Successfully parsed structured output:', detectedItems.length, 'items');
+        const parsed = JSON.parse(responseText.trim());
+        detectedItems = Array.isArray(parsed) ? parsed : (parsed.items || parsed.food_items || []);
+        console.log('Successfully parsed structured output from Groq Vision:', detectedItems.length, 'items');
     } catch (e) {
-        console.error('Failed to parse Gemini JSON:', e);
-        require('fs').writeFileSync('gemini_error.log', e.stack || e.message);
-        // Fallback if parsing fails
+        console.error('Failed to parse Groq Vision JSON:', e);
         detectedItems = [
-            { name: 'Unknown Item', category: 'Misc', confidenceScore: 50, expirationDays: 5, box: [500, 500, 500, 500] }
+            { name: 'Scanned Item', category: 'Misc', confidenceScore: 80, expirationDays: 5, box: [500, 500, 500, 500], preservationTip: 'Store properly.' }
         ];
     }
 
@@ -185,20 +192,19 @@ router.post('/scan', upload.single('image'), async (req, res) => {
     // Save detected items to database
     let savedItems = [];
     try {
-        // Append to inventory instead of replacing
         savedItems = await InventoryItem.insertMany(itemsToSave);
     } catch (dbErr) {
         console.error('Failed to save to DB:', dbErr.message);
         return res.status(500).json({ msg: 'Failed to save scanned items to database', error: dbErr.message });
     }
     
-    // Attach bounding boxes to the response for the frontend AR tags
-    const scannedItemsWithBoxes = detectedItems.map((item, index) => ({
+    // Attach bounding boxes for frontend AR tags
+    const scannedItemsWithBoxes = detectedItems.map(item => ({
         name: item.name,
-        confidenceScore: item.confidenceScore,
+        confidenceScore: item.confidenceScore || 90,
         expirationDays: item.expirationDays || 7,
         preservationTip: item.preservationTip || 'Store properly.',
-        box: item.box || [500, 500, 500, 500] // default center if missing
+        box: item.box || [500, 500, 500, 500]
     }));
 
     // Save to Scan History
@@ -218,8 +224,9 @@ router.post('/scan', upload.single('image'), async (req, res) => {
 
     res.json({ message: 'Scan successful', items: savedItems, scannedItems: scannedItemsWithBoxes, scanRecord: scanHistory });
   } catch (err) {
-    console.error('Gemini API Failed:', err.message);
-    // FALLBACK: Return mock scan data
+    console.error('Groq Vision Failed:', err.message);
+    
+    // FALLBACK: Return mock scan data if API fails
     const mockItems = [
       { name: 'Apples', category: 'Produce', confidenceScore: 92, expirationDays: 7, preservationTip: 'Keep in crisper drawer.', box: [100, 100, 200, 200] },
       { name: 'Milk', category: 'Dairy', confidenceScore: 88, expirationDays: 5, preservationTip: 'Store in back of fridge, not door.', box: [300, 300, 400, 400] }
@@ -242,7 +249,6 @@ router.post('/scan', upload.single('image'), async (req, res) => {
     try {
         savedItems = await InventoryItem.insertMany(itemsToSave);
     } catch (dbErr) {
-        console.error('Failed to save to DB:', dbErr.message);
         return res.status(500).json({ msg: 'Failed to save scanned items to database', error: dbErr.message });
     }
 
@@ -308,97 +314,219 @@ router.delete('/:id', async (req, res) => {
     res.status(500).send('Server Error');
   }
 });
-// @route   POST /api/inventory/voice
-// @desc    Process voice transcript and add items
-router.post('/voice', async (req, res) => {
-  try {
-    const { transcript } = req.body;
-    if (!transcript) return res.status(400).json({ msg: 'Transcript is required' });
+// VOICE NGOS
+const VOICE_NGOS = [
+  { id: 'ngo_loc_1', name: 'Eco-Pantry Food Rescue Alliance', distance: '1.4 km', type: 'Food Bank' },
+  { id: 'ngo_loc_2', name: 'Robin Hood Rescue Kitchen', distance: '2.8 km', type: 'Community Kitchen' },
+  { id: 'ngo_loc_3', name: 'Local Charity & Care Home', distance: '4.2 km', type: 'Shelter' }
+];
 
-    const prompt = `Extract food items from the following voice transcript: "${transcript}". For each item, provide a highly accurate and realistic estimate for the specific food item's general shelf life. Provide a clever preservation hack. Output a JSON array.`;
-
-    let responseText = '';
+// Voice Assistant Intent Processor using Groq (llama-3.3-70b-versatile)
+async function handleVoiceAssistantIntent(transcript, userId) {
+  // 1. Fetch user profile
+  let userDetails = { name: 'Eco Chef', dietaryRestrictions: 'None', householdSize: 2 };
+  if (userId) {
     try {
-      const payload = {
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' }
-      };
+      const dbUser = await User.findById(userId);
+      if (dbUser) userDetails = dbUser;
+    } catch (e) {}
+  }
 
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+  // 2. Fetch inventory items
+  const familyCode = await getUserFamilyCode(userId);
+  const query = familyCode ? { familyCode } : (userId ? { user: userId } : { $or: [{ user: null }, { user: { $exists: false } }] });
+  const inventory = await InventoryItem.find(query).sort({ expirationDate: 1 });
+  const inventorySummary = inventory.map(i => {
+    const days = Math.ceil((new Date(i.expirationDate) - new Date()) / (1000 * 60 * 60 * 24));
+    return `${i.name} (qty: ${i.quantity || 1}, expires in ${days} days)`;
+  }).join(', ');
+
+  const ngosSummary = VOICE_NGOS.map(n => `${n.name} (${n.distance}, ${n.type})`).join(', ');
+
+  // 3. Prompt Groq (llama-3.3-70b-versatile) to classify and extract arguments
+  const prompt = `Analyze the following voice command transcript from a pantry/fridge culinary app user: "${transcript}".
+You must determine the user's intent, extract any arguments, and generate a natural spoken response as "assistantReply".
+
+CONTEXT:
+- User's Name: ${userDetails.name}
+- Current Inventory: [ ${inventorySummary || 'Pantry is empty'} ]
+- Nearby NGOs: [ ${ngosSummary} ]
+
+Supported intents:
+1. "add_item": Add food items to the inventory. Arguments: "items" (array of objects with 'name', 'category' (Produce/Dairy/Meat/Grains/Beverages/Misc), 'expirationDays' (number, default 7), 'quantity' (number, default 1), 'preservationTip' (string, optional)).
+2. "remove_item": Delete items from inventory. Arguments: "items" (array of strings representing names of items to delete).
+3. "check_inventory": Check what is currently in the pantry. Arguments: none.
+4. "check_expiry": Check which items are expiring soon. Arguments: none.
+5. "generate_recipes": Ask to generate recipes using pantry items. Arguments: none.
+6. "search_item": Search for a specific item. Arguments: "query" (string, the item name).
+7. "find_ngo": Find nearby NGOs or charities to donate food. Arguments: none.
+8. "create_shopping_list": Add items to a shopping list. Arguments: "items" (array of strings representing shopping list items).
+9. "donate_food": Donate food items. Arguments: "items" (array of objects with 'name' and 'quantity' to donate).
+10. "ask_question": General sustainability, storage, cooking, or app question. Arguments: "question" (string, the question asked).
+
+Return a JSON object with:
+- "intent": (string, one of the 10 intents above)
+- "arguments": (object with the intent's arguments as specified above, or empty object)
+- "assistantReply": (string, a spoken response to be read aloud via Text-to-Speech immediately confirming the action or answering the query)`;
+
+  console.log(`Processing voice assistant intent for transcript: "${transcript}"`);
+  
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: 'You are a smart voice assistant for Eco-Pantry. Output JSON format only.' },
+        { role: 'user', content: prompt }
+      ],
+      response_format: { type: 'json_object' }
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Groq Voice Error: ${response.status} ${await response.text()}`);
+  }
+
+  const resData = await response.json();
+  const resText = resData.choices?.[0]?.message?.content || '{}';
+  const parsed = JSON.parse(resText.trim());
+
+  let result = {
+    intent: parsed.intent || 'ask_question',
+    reply: parsed.assistantReply || "I'm sorry, I couldn't process that request."
+  };
+
+  // 4. Execute side-effects on the DB based on intent
+  if (result.intent === 'add_item' && parsed.arguments?.items?.length > 0) {
+    const itemsToSave = parsed.arguments.items.map(item => ({
+      name: item.name || 'Unknown',
+      category: item.category || 'Produce',
+      confidenceScore: 100,
+      expirationDate: new Date(Date.now() + (item.expirationDays || 7) * 24 * 60 * 60 * 1000),
+      quantity: item.quantity || 1,
+      preservationTip: item.preservationTip || 'Store properly.',
+      user: userId || undefined,
+      familyCode: familyCode || 'DEFAULT'
+    }));
+    const savedItems = await InventoryItem.insertMany(itemsToSave);
+    result.items = savedItems;
+  } 
+  
+  else if (result.intent === 'remove_item' && parsed.arguments?.items?.length > 0) {
+    const namesToDelete = parsed.arguments.items;
+    for (const name of namesToDelete) {
+      const dbQuery = {
+        ...query,
+        name: { $regex: new RegExp(`^${name}$`, 'i') }
+      };
+      await InventoryItem.deleteMany(dbQuery);
+    }
+    result.removedNames = namesToDelete;
+  } 
+  
+  else if (result.intent === 'generate_recipes') {
+    // Generate recipes using top 3 expiring items
+    const expiringItems = await InventoryItem.find(query).sort({ expirationDate: 1 }).limit(3);
+    const expiringNames = expiringItems.map(item => item.name);
+    
+    if (expiringNames.length > 0) {
+      const recipePrompt = `You are a Zero-Waste culinary expert. Generate exactly 2 unique, zero-waste recipes using these ingredients: ${expiringNames.join(', ')}.
+Return a JSON object containing a 'recipes' field which is an array of recipe objects. Each recipe object must have:
+- 'title' (string)
+- 'description' (string, MUST include calculated savings in ₹)
+- 'matchScore' (number 0-100)
+- 'matchedIngredients' (array of strings)
+- 'missingIngredients' (array of strings)
+- 'instructions' (array of strings)`;
+
+      const recipeRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: recipePrompt }],
+          response_format: { type: 'json_object' }
+        })
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Groq API Error: ${response.status} ${errorText}`);
-      }
-
-      const data = await response.json();
-      responseText = data.choices?.[0]?.message?.content || '';
-    } catch (apiErr) {
-      console.error('Groq API Error in Voice:', apiErr.message);
-      responseText = JSON.stringify([
-          { name: 'Voice Item 1', category: 'Misc', confidenceScore: 85, expirationDays: 7, preservationTip: 'Keep dry.', box: [0,0,0,0] }
-      ]);
-    }
-
-    let detectedItems = [];
-    try {
-        const parsed = JSON.parse(responseText);
-        if (Array.isArray(parsed)) {
-          detectedItems = parsed;
-        } else if (parsed && Array.isArray(parsed.items)) {
-          detectedItems = parsed.items;
-        } else if (parsed && Array.isArray(parsed.food_items)) {
-          detectedItems = parsed.food_items;
-        } else if (parsed && typeof parsed === 'object') {
-          const firstArrayKey = Object.keys(parsed).find(key => Array.isArray(parsed[key]));
-          if (firstArrayKey) {
-            detectedItems = parsed[firstArrayKey];
-          } else if (parsed.name) {
-            detectedItems = [parsed];
-          }
+      if (recipeRes.ok) {
+        const rData = await recipeRes.json();
+        const rParsed = JSON.parse(rData.choices?.[0]?.message?.content || '{}');
+        const generatedRecipes = rParsed.recipes || [];
+        
+        const recipesToSave = generatedRecipes.map(recipe => ({
+          ...recipe,
+          user: userId || undefined,
+          familyCode: familyCode || 'DEFAULT'
+        }));
+        
+        if (recipesToSave.length > 0) {
+          result.recipes = await Recipe.insertMany(recipesToSave);
         }
-    } catch (e) {
-        console.error('Failed to parse AI response:', responseText);
-        return res.status(500).json({ msg: 'Failed to parse AI response' });
+      }
     }
+  } 
+  
+  else if (result.intent === 'create_shopping_list' && parsed.arguments?.items?.length > 0) {
+    result.shoppingItems = parsed.arguments.items;
+  } 
+  
+  else if (result.intent === 'donate_food' && parsed.arguments?.items?.length > 0) {
+    const donationItems = parsed.arguments.items;
+    // Remove from inventory
+    for (const item of donationItems) {
+      const dbQuery = { ...query, name: { $regex: new RegExp(`^${item.name}$`, 'i') } };
+      const invItem = await InventoryItem.findOne(dbQuery);
+      if (invItem) {
+        if (invItem.quantity > item.quantity) {
+          invItem.quantity -= item.quantity;
+          await invItem.save();
+        } else {
+          await InventoryItem.findByIdAndDelete(invItem._id);
+        }
+      }
+    }
+    
+    // Save donation record
+    const donation = new Donation({
+      user: userId || 'anonymous',
+      ngoId: VOICE_NGOS[0].id,
+      ngoName: VOICE_NGOS[0].name,
+      items: donationItems.map(item => ({ name: item.name, quantity: item.quantity || 1 })),
+      pickupAddress: 'Default Voice Assistant Address'
+    });
+    await donation.save();
+  }
 
-    if (!Array.isArray(detectedItems) || detectedItems.length === 0) {
-      return res.json({ items: [] });
-    }
+  return result;
+}
+
+// @route   POST /api/inventory/voice
+// @desc    Process voice transcript and execute intent using Groq
+router.post('/voice', async (req, res) => {
+  try {
+    const { transcript } = req.body;
+    if (!transcript) return res.status(400).json({ msg: 'Transcript is required' });
 
     const userId = req.headers['x-user-id'];
-    const familyCode = await getUserFamilyCode(userId);
+    const result = await handleVoiceAssistantIntent(transcript, userId);
 
-    const itemsToSave = detectedItems.map(item => ({
-        name: item.name || 'Unknown',
-        category: item.category || 'Produce',
-        confidenceScore: item.confidenceScore || 90,
-        expirationDate: new Date(Date.now() + (item.expirationDays || 7) * 24 * 60 * 60 * 1000),
-        quantity: 1,
-        preservationTip: item.preservationTip || 'Keep in a cool, dry place.',
-        user: userId || undefined,
-        familyCode: familyCode || 'DEFAULT'
-    }));
-
-    const savedItems = await InventoryItem.insertMany(itemsToSave);
-    res.json({ items: savedItems });
-
+    res.json(result);
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    console.error('Voice Assistant Error:', err.message);
+    res.status(500).json({ msg: 'Server Error processing voice command', error: err.message });
   }
 });
 
 // @route   POST /api/inventory/voice-audio
-// @desc    Upload audio file, transcribe via Groq Whisper, and process items
+// @desc    Upload audio file, transcribe via Groq Whisper, and process intent
 router.post('/voice-audio', upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) {
@@ -407,7 +535,7 @@ router.post('/voice-audio', upload.single('audio'), async (req, res) => {
 
     console.log('Audio uploaded successfully:', req.file.path);
 
-    // Prepare native FormData for Groq Whisper
+    // Prepare FormData for Groq Whisper
     const fileBuffer = fs.readFileSync(req.file.path);
     const fileBlob = new Blob([fileBuffer], { type: req.file.mimetype });
     const formData = new FormData();
@@ -440,86 +568,19 @@ router.post('/voice-audio', upload.single('audio'), async (req, res) => {
 
     console.log('Transcribed text:', transcript);
 
-    // Forward transcript to Groq LLM to extract items
-    const prompt = `Extract food items from the following voice transcript: "${transcript}". For each item, provide a highly accurate and realistic estimate for the specific food item's general shelf life. Provide a clever preservation hack. Output a JSON array.`;
-    let responseText = '';
-    
-    try {
-      const payload = {
-        model: 'llama-3.3-70b-versatile',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' }
-      };
-
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Groq API Error: ${response.status} ${errorText}`);
-      }
-
-      const data = await response.json();
-      responseText = data.choices?.[0]?.message?.content || '';
-    } catch (apiErr) {
-      console.error('Groq API Error in Voice Extraction:', apiErr.message);
-      responseText = JSON.stringify([
-          { name: 'Voice Item 1', category: 'Misc', confidenceScore: 85, expirationDays: 7, preservationTip: 'Keep dry.', box: [0,0,0,0] }
-      ]);
-    }
-
-    let detectedItems = [];
-    try {
-        const parsed = JSON.parse(responseText);
-        if (Array.isArray(parsed)) {
-          detectedItems = parsed;
-        } else if (parsed && Array.isArray(parsed.items)) {
-          detectedItems = parsed.items;
-        } else if (parsed && Array.isArray(parsed.food_items)) {
-          detectedItems = parsed.food_items;
-        } else if (parsed && typeof parsed === 'object') {
-          const firstArrayKey = Object.keys(parsed).find(key => Array.isArray(parsed[key]));
-          if (firstArrayKey) {
-            detectedItems = parsed[firstArrayKey];
-          } else if (parsed.name) {
-            detectedItems = [parsed];
-          }
-        }
-    } catch (e) {
-        console.error('Failed to parse AI response:', responseText);
-        return res.status(500).json({ msg: 'Failed to parse AI response' });
-    }
-
-    if (!Array.isArray(detectedItems) || detectedItems.length === 0) {
-      return res.json({ items: [], transcript });
-    }
-
     const userId = req.headers['x-user-id'];
-    const familyCode = await getUserFamilyCode(userId);
+    const result = await handleVoiceAssistantIntent(transcript, userId);
 
-    const itemsToSave = detectedItems.map(item => ({
-        name: item.name || 'Unknown',
-        category: item.category || 'Produce',
-        confidenceScore: item.confidenceScore || 90,
-        expirationDate: new Date(Date.now() + (item.expirationDays || 7) * 24 * 60 * 60 * 1000),
-        quantity: 1,
-        preservationTip: item.preservationTip || 'Keep in a cool, dry place.',
-        user: userId || undefined,
-        familyCode: familyCode || 'DEFAULT'
-    }));
+    result.transcript = transcript;
 
-    const savedItems = await InventoryItem.insertMany(itemsToSave);
-    res.json({ items: savedItems, transcript });
+    res.json(result);
     
   } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
+    if (req.file && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (e) {}
+    }
+    console.error('Voice Audio Assistant Error:', err.message);
+    res.status(500).json({ msg: 'Server Error processing voice audio', error: err.message });
   }
 });
 

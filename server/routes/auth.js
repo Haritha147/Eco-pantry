@@ -228,6 +228,35 @@ router.put('/profile', authMiddleware, async (req, res) => {
   }
 });
 
+// @route   POST /api/auth/change-password
+// @desc    Change user password
+router.post('/change-password', authMiddleware, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ msg: 'Please provide current and new passwords' });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user) {
+      return res.status(404).json({ msg: 'User not found' });
+    }
+
+    const isMatch = await comparePassword(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ msg: 'Current password is incorrect' });
+    }
+
+    user.password = await hashPassword(newPassword);
+    await user.save();
+
+    res.json({ msg: 'Password changed successfully' });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
 // @route   POST /api/auth/resend-otp
 // @desc    Resend OTP to user
 router.post('/resend-otp', async (req, res) => {
@@ -253,82 +282,6 @@ router.post('/resend-otp', async (req, res) => {
     res.json({
       msg: 'New OTP code sent. Check your email.',
       email: user.email
-    });
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
-  }
-});
-
-// @route   POST /api/auth/google
-// @desc    Login or register via Google Auth
-router.post('/google', async (req, res) => {
-  try {
-    const { email, name, picture, familyCode } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ msg: 'Google email is required' });
-    }
-
-    let user = await User.findOne({ email: email.toLowerCase() });
-    
-    if (user) {
-      let isChanged = false;
-      if (!user.isVerified) {
-        user.isVerified = true;
-        isChanged = true;
-      }
-      if (picture && user.picture !== picture) {
-        user.picture = picture;
-        isChanged = true;
-      }
-      if (isChanged) {
-        await user.save();
-      }
-      return res.json({
-        msg: 'Login successful via Google',
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          dietaryRestrictions: user.dietaryRestrictions,
-          householdSize: user.householdSize,
-          points: user.points,
-          badge: user.badge,
-          picture: user.picture,
-          familyCode: user.familyCode
-        }
-      });
-    }
-
-    // Create a random password for OAuth user
-    const randomPassword = crypto.randomBytes(16).toString('hex');
-    const hashedPassword = hashPassword(randomPassword);
-
-    user = new User({
-      name: name || 'Google User',
-      email: email.toLowerCase(),
-      password: hashedPassword,
-      isVerified: true,
-      picture: picture || null,
-      familyCode: familyCode || crypto.randomBytes(3).toString('hex').toUpperCase()
-    });
-
-    await user.save();
-
-    res.status(201).json({
-      msg: 'Registration successful via Google',
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        dietaryRestrictions: user.dietaryRestrictions,
-        householdSize: user.householdSize,
-        points: user.points,
-        badge: user.badge,
-        picture: user.picture,
-        familyCode: user.familyCode
-      }
     });
   } catch (err) {
     console.error(err.message);
