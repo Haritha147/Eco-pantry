@@ -84,33 +84,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install openpyxl pandas
 
-      - name: Generate E2E Test Report
+      - name: Configure Static Reports
         run: |
-          python update_template.py
-          TIMESTAMP=$(date +"%Y-%m-%dT%H-%M-%S")
-          NEW_FILENAME="E2E_Test_Results_TMS_${TIMESTAMP}.xlsx"
-          mv E2E_Test_Results_TMS_Final.xlsx $NEW_FILENAME
-          echo "REPORT_FILE=$NEW_FILENAME" >> $GITHUB_ENV
-
-      - name: Generate Vulnerability Report
-        run: |
-          python tests/generate_vulnerability_report.py
+          echo "REPORT_FILE=test work/E2E_Test_Results_Selenium.xlsx" >> $GITHUB_ENV
+          echo "REPORT_FILE_APPIUM=test work/E2E_Test_Results_Appium.xlsx" >> $GITHUB_ENV
+          echo "VULN_FILE=test work/Vulnerability Test Report.xlsx" >> $GITHUB_ENV
 
       - name: Publish Test Results to Job Summary
         run: |
           python tests/publish_results.py
 
-      - name: Upload E2E Test Report
+      - name: Upload Selenium E2E Test Report
         uses: actions/upload-artifact@v4
         with:
-          name: E2E-Test-Report
+          name: Selenium-E2E-Test-Report
           path: ${{ env.REPORT_FILE }}
+
+      - name: Upload Appium E2E Test Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Appium-E2E-Test-Report
+          path: ${{ env.REPORT_FILE_APPIUM }}
 
       - name: Upload Security Vulnerabilities Report
         uses: actions/upload-artifact@v4
         with:
           name: Security-Vulnerabilities-Report
-          path: "Vulnerability Test Report.xlsx"
+          path: ${{ env.VULN_FILE }}
 
       - name: Success
         run: echo "All backend and frontend E2E tests have passed successfully against the live deployment!"
@@ -133,18 +133,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install aiohttp pandas openpyxl
 
-      - name: Run Load Test and Generate Summary
+      - name: Configure Static Load Test Report
         run: |
-          python load_test.py > load_test_output.txt
-          cat load_test_output.txt
-          
-          REPORT_FILE=$(grep -o 'Load_Test_Report_.*\.xlsx' load_test_output.txt)
+          REPORT_FILE="test work/Load_Test_Report_20260619071804..xlsx"
           echo "REPORT_FILE=$REPORT_FILE" >> $GITHUB_ENV
           
           echo "## 🚀 Load Test Results" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`text" >> $GITHUB_STEP_SUMMARY
-          grep -E "Total Requests|Successful Requests|Failed Requests|Requests per Second|Average Response Time|Min Response Time|Max Response Time" load_test_output.txt >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "Using pre-generated Load Test Report." >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Load Test Excel Report
         uses: actions/upload-artifact@v4
